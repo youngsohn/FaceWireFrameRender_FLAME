@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import pyrender
 import torch
@@ -21,33 +20,35 @@ def look_at(eye, target=(0.0, 0.0, 0.0), up=(0.0, 1.0, 0.0)):
     u = np.cross(r, f)
     u = u / (np.linalg.norm(u) + 1e-8)
 
-    # Camera looks down -Z in camera coords
     R = np.stack([r, u, -f], axis=1)
-
     T = np.eye(4, dtype=np.float32)
     T[:3, :3] = R
     T[:3, 3] = eye
     return T
 
 
-def debug_print_vec(name, v):
-    v = np.asarray(v).reshape(-1)
-    print(f"{name}: [{v[0]: .6f}, {v[1]: .6f}, {v[2]: .6f}]")
+def rot_z(deg_clockwise: float):
+    """Rotation about +Z. Clockwise in screen coords corresponds to negative angle."""
+    a = np.deg2rad(-deg_clockwise)
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, -s, 0.0],
+                     [s,  c, 0.0],
+                     [0.0, 0.0, 1.0]], dtype=np.float32)
+
+
+def rot_x(deg: float):
+    """Rotation about +X (right axis). 180 deg flips up/down."""
+    a = np.deg2rad(deg)
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[1.0, 0.0, 0.0],
+                     [0.0, c,  -s],
+                     [0.0, s,   c]], dtype=np.float32)
 
 
 def main():
-    print("=== FLAME VIEWER DEBUG ===")
-    print("cwd:", os.getcwd())
-
-    # -------------------------
-    # Device
-    # -------------------------
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print("Using device:", device)
 
-    # -------------------------
-    # Config + paths
-    # -------------------------
     config = get_config()
     config.flame_model_path = "./model/generic_model.pkl"
     config.static_landmark_embedding_path = "./model/flame_static_embedding.pkl"
@@ -55,16 +56,11 @@ def main():
 
     B = 1
     if hasattr(config, "batch_size"):
-        print("config.batch_size (before):", getattr(config, "batch_size"))
         config.batch_size = B
-        print("config.batch_size (after):", getattr(config, "batch_size"))
 
-    print("creating the FLAME Decoder")
     flamelayer = FLAME(config).to(device)
 
-    # -------------------------
-    # Neutral params, FRONT VIEW
-    # -------------------------
+    # neutral, front pose
     shape_params = torch.zeros(B, 100, dtype=torch.float32, device=device)
     expression_params = torch.zeros(B, 50, dtype=torch.float32, device=device)
     pose_params = torch.zeros(B, 6, dtype=torch.float32, device=device)
@@ -74,12 +70,10 @@ def main():
     use_neck_eye = bool(getattr(config, "optimize_neckpose", False)) and bool(
         getattr(config, "optimize_eyeballpose", False)
     )
-    print("use_neck_eye:", use_neck_eye)
     if use_neck_eye:
         neck_pose = torch.zeros(B, 3, dtype=torch.float32, device=device)
         eye_pose = torch.zeros(B, 6, dtype=torch.float32, device=device)
 
-    # Forward
     if neck_pose is None:
         vertice, _landmark = flamelayer(shape_params, expression_params, pose_params)
     else:
@@ -88,63 +82,41 @@ def main():
     vertices = vertice[0].detach().cpu().numpy()
     faces = flamelayer.faces
 
-    print("vertices shape:", vertices.shape)
-    print("faces shape:", faces.shape)
+    # 1) Center mesh
+    center = 0.5 * (vertices.min(axis=0) + vertices.max(axis=0))
+    vertices = vertices - center
 
-    # -------------------------
-    # Center mesh (bbox center)
-    # -------------------------
-    vmin0 = vertices.min(axis=0)
-    vmax0 = vertices.max(axis=0)
-    center0 = 0.5 * (vmin0 + vmax0)
-    extent0 = vmax0 - vmin0
+    # 2) Rotate in image plane (your original)
+    #Rz = rot_z(180.0)
+    Rz = rot_z(0.0)
+    vertices = (Rz @ vertices.T).T
 
-    print("--- raw mesh bbox ---")
-    debug_print_vec("vmin0", vmin0)
-    debug_print_vec("vmax0", vmax0)
-    debug_print_vec("center0", center0)
-    debug_print_vec("extent0", extent0)
+    # 3) FIX: flip vertically so head is up, shoulders down
+    # (this corrects the upside-down result you showed)
+    #Rx = rot_x(180.0)
+    Rx = rot_x(0.0)
+    vertices = (Rx @ vertices.T).T
 
-    vertices = vertices - center0
-
+    # 4) Camera distance to fit
     vmin = vertices.min(axis=0)
     vmax = vertices.max(axis=0)
-    center = 0.5 * (vmin + vmax)
     extent = vmax - vmin
-
-    print("--- centered mesh bbox (should be near 0) ---")
-    debug_print_vec("vmin", vmin)
-    debug_print_vec("vmax", vmax)
-    debug_print_vec("center", center)
-    debug_print_vec("extent", extent)
-
-    # -------------------------
-    # Camera fit (front view)
-    # -------------------------
     radius = 0.5 * np.linalg.norm(extent) + 1e-6
 
     yfov_deg = 25.0
     yfov = np.deg2rad(yfov_deg)
-    padding = 1.45
+    padding = 1.35
     dist = (radius / np.tan(yfov / 2.0)) * padding
 
-    print("--- camera params ---")
-    print("radius:", float(radius))
-    print("yfov_deg:", yfov_deg)
-    print("padding:", padding)
-    print("dist:", float(dist))
+    camera = pyrender.PerspectiveCamera(yfov=yfov)
 
-    eye = np.array([0.0, 0.0, dist], dtype=np.float32)
-    target = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-    cam_pose = look_at(eye, target=target, up=(0.0, 1.0, 0.0))
+    cam_pose = look_at(
+        eye=(0.0, 0.0, dist),
+        target=(0.0, 0.0, 0.0),
+        up=(0.0, 1.0, 0.0),
+    )
 
-    debug_print_vec("eye", eye)
-    debug_print_vec("target", target)
-    print("cam_pose:\n", cam_pose)
-
-    # -------------------------
-    # Mesh + scene
-    # -------------------------
+    # Build mesh (NO landmark spheres)
     vertex_colors = np.ones((vertices.shape[0], 4), dtype=np.float32) * np.array(
         [0.78, 0.65, 0.58, 1.0], dtype=np.float32
     )
@@ -157,40 +129,9 @@ def main():
     )
     scene.add(render_mesh)
 
-    camera = pyrender.PerspectiveCamera(yfov=yfov)
-    cam_node = scene.add(camera, pose=cam_pose)
-
-    # Try to mark it main camera if supported
-    try:
-        scene.main_camera_node = cam_node
-        print("scene.main_camera_node set")
-    except Exception as e:
-        print("scene.main_camera_node not supported:", repr(e))
-
-    # Light from camera direction
+    scene.add(camera, pose=cam_pose)
     scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=2.5), pose=cam_pose)
 
-    # -------------------------
-    # Offscreen debug render (authoritative)
-    # -------------------------
-    out_png = "debug_render.png"
-    try:
-        r = pyrender.OffscreenRenderer(viewport_width=1200, viewport_height=900)
-        color, depth = r.render(scene)
-        r.delete()
-        try:
-            import imageio.v2 as imageio
-        except Exception:
-            import imageio
-        imageio.imwrite(out_png, color)
-        print(f"[OK] wrote {out_png} (check this file first!)")
-    except Exception as e:
-        print("[WARN] OffscreenRenderer failed:", repr(e))
-        print("Proceeding to Viewer...")
-
-    # -------------------------
-    # Viewer (may ignore camera on some setups; offscreen PNG is the truth)
-    # -------------------------
     pyrender.Viewer(
         scene,
         use_raymond_lighting=False,
