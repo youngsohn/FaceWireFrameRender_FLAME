@@ -29,7 +29,7 @@ from flame_pytorch import FLAME, get_config
 # --------------------------
 # USER SETTINGS
 # --------------------------
-IMAGE_PATH = "face4.png"
+IMAGE_PATH = "face2.png"
 OUT_DEBUG_LMK = "debug_landmarks.png"
 OUT_DEBUG_OVERLAY = "debug_fit_overlay.png"
 OUT_DEBUG_EYES = "debug_eye_masks.png"
