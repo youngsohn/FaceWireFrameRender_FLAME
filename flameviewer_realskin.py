@@ -256,34 +256,35 @@ def sample_vertex_colors(img_bgr, V, F, A, t):
 # 5) Render
 # --------------------------
 def render_mesh(V, F, vertex_rgba):
+    import numpy as np
+    import trimesh
+    import pyrender
+
     tri_mesh = trimesh.Trimesh(V, F, process=False)
-    tri_mesh.visual.vertex_colors = (vertex_rgba * 255.0).astype(np.uint8)
-    tri_mesh.fix_normals()
+    tri_mesh.visual.vertex_colors = (np.clip(vertex_rgba, 0, 1) * 255).astype(np.uint8)
 
-    mesh = pyrender.Mesh.from_trimesh(tri_mesh, smooth=True)
+    mesh = pyrender.Mesh.from_trimesh(tri_mesh, smooth=False)
 
-    # auto-fit camera distance
-    vmin = V.min(axis=0)
-    vmax = V.max(axis=0)
-    extent = vmax - vmin
-    radius = 0.5 * np.linalg.norm(extent) + 1e-6
-
+    # camera auto-fit
+    vmin = V.min(axis=0); vmax = V.max(axis=0)
+    radius = 0.5 * np.linalg.norm(vmax - vmin) + 1e-6
     yfov = np.deg2rad(YFOV_DEG)
     dist = (radius / np.tan(yfov / 2.0)) * 1.35
 
-    cam_pose = look_at(
-        eye=(0.0, 0.0, dist),
-        target=(0.0, 0.0, 0.0),
-        up=(0.0, 1.0, 0.0),
-    )
+    cam_pose = look_at((0.0, 0.0, dist))
     camera = pyrender.PerspectiveCamera(yfov=yfov)
 
-    scene = pyrender.Scene(bg_color=[1, 1, 1, 1], ambient_light=[0.25, 0.25, 0.25])
+    scene = pyrender.Scene(
+        bg_color=[1, 1, 1, 1],
+        ambient_light=[1.0, 1.0, 1.0],
+    )
     scene.add(mesh)
     scene.add(camera, pose=cam_pose)
 
-    # light from camera
-    scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=3.0), pose=cam_pose)
+    flags = {
+        pyrender.RenderFlags.FLAT: True,
+        pyrender.RenderFlags.SKIP_CULL_FACES: True,
+    }
 
     pyrender.Viewer(
         scene,
@@ -291,9 +292,10 @@ def render_mesh(V, F, vertex_rgba):
         viewport_size=(VIEWPORT_W, VIEWPORT_H),
         camera=camera,
         camera_pose=cam_pose,
+        render_flags=flags,
     )
-
-
+    
+    
 # --------------------------
 # MAIN
 # --------------------------
